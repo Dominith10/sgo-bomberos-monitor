@@ -22,23 +22,72 @@ function normalizeMachine(v) {
 function readRows(html) {
   const $ = cheerio.load(html);
   const records = [];
-  $('table tr').each((_idx, row) => {
-    const cells = $(row).find('> td');
-    if (cells.length < 7) return;
-    const part = $(cells[1]).text().trim().replace(/\s+/g, '');
-    if (!/^\d{6,20}$/.test(part)) return;
-    const date = $(cells[2]).text().trim().replace(/\s+/g, ' ');
-    const address = $(cells[3]).text().trim().replace(/\s+/g, ' ');
-    const emergency = $(cells[4]).text().trim().replace(/\s+/g, ' ');
-    const status = $(cells[5]).text().trim().replace(/\s+/g, ' ');
-    const machineCell = $(cells[6]);
-    const rawMachines = machineCell.find('li').length
-      ? machineCell.find('li').map((_, li) => $(li).text()).get()
-      : machineCell.text().split(/[\n,;]+/);
-    const machines = [...new Set(rawMachines.map(normalizeMachine).filter(Boolean))];
-    records.push({ part, date, address, emergency, status, machines });
+  const tables = $('table');
+  let candidates = 0;
+
+  tables.each((_ti, table) => {
+    const headers = $(table).find('thead tr').first().find('th').map((_, th) =>
+      $(th).text().replace(/\s+/g, ' ').trim().toLowerCase()
+    ).get();
+    const idx = (pattern, fallback) => {
+      const n = headers.findIndex(h => pattern.test(h));
+      return n >= 0 ? n : fallback;
+    };
+    const partIndex = idx(/nro\.?\s*parte|n[uú]mero\s*de\s*parte/, 1);
+    const dateIndex = idx(/fecha/, 2);
+    const addressIndex = idx(/direcci[oó]n/, 3);
+    const emergencyIndex = idx(/^tipo|tipo\s*emergencia/, 4);
+    const statusIndex = idx(/estado/, 5);
+    const machineIndex = idx(/m[aá]quinas|unidades/, 6);
+
+    $(table).find('tr').each((_ri, row) => {
+      const cells = $(row).children('td');
+      if (cells.length < 7) return;
+      candidates++;
+      if (Math.max(partIndex, dateIndex, addressIndex, emergencyIndex, statusIndex, machineIndex) >= cells.length) return;
+      const part = $(cells[partIndex]).text().trim().replace(/\s+/g, '');
+      if (!/^\d{6,20}$/.test(part)) return;
+      const clean = n => $(cells[n]).text().replace(/\s+/g, ' ').trim();
+      const machineCell = $(cells[machineIndex]);
+      const list = machineCell.find('li');
+      const rawMachines = list.length
+        ? list.map((_, li) => $(li).text()).get()
+        : machineCell.text().split(/[\n,;]+/);
+      const machines = [...new Set(rawMachines.map(normalizeMachine).filter(Boolean))];
+      records.push({
+        part,
+        date: clean(dateIndex),
+        address: clean(addressIndex),
+        emergency: clean(emergencyIndex),
+        status: clean(statusIndex),
+        machines,
+      });
+    });
   });
-  if (!records.length) throw new Error('No se pudo interpretar la tabla de SGO Norte. No se modificó el estado.');
+
+  if (!records.length) {
+    // Diagnostico limitado. No imprimir credenciales, cookies ni HTML completo.
+    const title = $('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 120);
+    const headings = $('h1,h2,h3,h4').slice(0, 5).map((_, e) =>
+      $(e).text().replace(/\s+/g, ' ').trim().slice(0, 90)
+    ).get();
+    const samples = tables.slice(0, 3).map((_, t) => ({
+      filas: $(t).find('tr').length,
+      encabezados: $(t).find('thead th').map((_, th) =>
+        $(th).text().replace(/\s+/g, ' ').trim().slice(0, 35)
+      ).get().slice(0, 9),
+      celdasPrimeraFila: $(t).find('tr').filter((_, tr) => $(tr).children('td').length > 0).first().children('td').length,
+    })).get();
+    console.error('SGO DIAGNOSTICO:', JSON.stringify({
+      titulo: title,
+      longitudHTML: html.length,
+      tablas: tables.length,
+      filasConSieteCeldas: candidates,
+      encabezadosPagina: headings,
+      muestrasTabla: samples,
+    }));
+    throw new Error('No se pudo interpretar la tabla de SGO Norte. No se modificó el estado.');
+  }
   if (records.length > MAX_RECORDS) throw new Error('Numero de filas inesperado: ' + records.length);
   return records;
 }
@@ -49,7 +98,18 @@ async function getSGO() {
     headers: { 'user-agent': 'SGO-Bomberos-Monitor/1.0 (prototipo educativo; 1 consulta/5 min)', accept: 'text/html' },
   });
   if (!response.ok) throw new Error(`SGO HTTP ${response.status}`);
-  return readRows(await response.text());
+  const contentType = response.headers.get('content-type') || '';
+  const html = await response.text();
+  console.log('SGO respuesta:', JSON.stringify({
+    status: response.status,
+    contentType: contentType.slice(0, 100),
+    url: response.url.slice(0, 180),
+    longitud: html.length,
+  }));
+  if (!/html/i.test(contentType) && !/<html|<table/i.test(html)) {
+    throw new Error('SGO no devolvió HTML. No se modificó el estado.');
+  }
+  return readRows(html);
 }
 
 function entries(rows) {

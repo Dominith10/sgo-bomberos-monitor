@@ -1,8 +1,9 @@
 
 'use strict';
 
-// Monitor SGO Norte -> Firestore -> FCM.
-// Usa solo datos publicos de SGO y credenciales mediante GitHub Secrets.
+// SGO Norte -> Firestore -> FCM.
+// Las credenciales se obtienen mediante GitHub Secrets.
+// No guardar claves privadas ni tokens en este repositorio.
 
 const crypto = require('node:crypto');
 const cheerio = require('cheerio');
@@ -11,7 +12,12 @@ const { initializeApp, cert } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const { getMessaging } = require('firebase-admin/messaging');
 
+// ==========================================
+// CONFIGURACIÓN GENERAL
+// ==========================================
+
 const SOURCE = 'https://sgonorte.bomberosperu.gob.pe/24horas';
+
 const STATE_DOC = 'monitor_control/sgo_norte_24h';
 
 const MAX_RECORDS = 300;
@@ -24,7 +30,7 @@ const RESET_BASELINE = process.env.RESET_BASELINE === 'true';
 const TIMEOUT_MS = 20000;
 
 // ==========================================
-// NORMALIZAR CODIGOS DE MAQUINAS
+// FUNCIONES AUXILIARES
 // ==========================================
 
 function normalizeMachine(value) {
@@ -40,12 +46,20 @@ function normalizeText(value) {
     .trim();
 }
 
+function hash(value) {
+  return crypto
+    .createHash('sha256')
+    .update(value)
+    .digest('hex');
+}
+
 // ==========================================
-// LEER TABLA DE SGO NORTE
+// LEER LOS DESPACHOS DE SGO NORTE
 // ==========================================
 
 function readRows(html) {
   const $ = cheerio.load(html);
+
   const records = new Map();
 
   let candidateRows = 0;
@@ -57,13 +71,15 @@ function readRows(html) {
 
     candidateRows++;
 
-    // Buscar el numero de parte entre las
-    // primeras tres celdas.
-    const partIndex = cells.slice(0, 3).findIndex(
-      cell => /^\d{8,20}$/.test(
-        normalizeText($(cell).text())
-      )
-    );
+    // Buscar el número de parte entre las
+    // primeras tres columnas.
+    const partIndex = cells
+      .slice(0, 3)
+      .findIndex(cell =>
+        /^\d{8,20}$/.test(
+          normalizeText($(cell).text())
+        )
+      );
 
     if (partIndex < 0) return;
 
@@ -109,7 +125,6 @@ function readRows(html) {
       )
     ];
 
-    // Evitar duplicar un mismo parte.
     const previous = records.get(part);
 
     if (previous) {
@@ -139,17 +154,19 @@ function readRows(html) {
     `${rows.filter(r => r.machines.length).length} con maquinas.`
   );
 
-  if (!rows.length || !rows.some(r => r.machines.length)) {
+  if (
+    !rows.length ||
+    !rows.some(r => r.machines.length)
+  ) {
     throw new Error(
-      'No se pudo interpretar de forma segura la tabla de SGO. ' +
-      'Estado sin modificar.'
+      'No se pudo interpretar la tabla SGO ' +
+      'de forma segura. Estado intacto.'
     );
   }
 
   if (rows.length > MAX_RECORDS) {
     throw new Error(
-      `Cantidad inesperada de partes: ${rows.length}. ` +
-      'Estado sin modificar.'
+      `Cantidad inesperada de partes: ${rows.length}.`
     );
   }
 
@@ -157,7 +174,7 @@ function readRows(html) {
 }
 
 // ==========================================
-// CONSULTAR SGO NORTE
+// CONSULTAR LA PÁGINA DE SGO
 // ==========================================
 
 async function getSGO() {
@@ -166,68 +183,75 @@ async function getSGO() {
 
     headers: {
       'user-agent':
-        'SGO-Bomberos-Monitor/1.0 (prototipo; consulta periodica)',
+        'SGO-Bomberos-Monitor/1.0 ' +
+        '(prototipo; consulta periodica)',
       accept: 'text/html'
     }
   });
 
   if (!response.ok) {
-    throw new Error(`SGO HTTP ${response.status}`);
+    throw new Error(
+      `SGO HTTP ${response.status}`
+    );
   }
 
-  return readRows(await response.text());
+  return readRows(
+    await response.text()
+  );
 }
 
 // ==========================================
-// GENERAR IDENTIFICADORES UNICOS
+// IDENTIFICADORES DE ASIGNACIONES
 // ==========================================
 
 function entries(rows) {
-  const result = new Map();
+  const map = new Map();
 
-  for (const r of rows) {
-    for (const machine of r.machines) {
-      const key = crypto
-        .createHash('sha256')
-        .update(`${r.part}|${machine}`)
-        .digest('hex')
-        .slice(0, 32);
+  for (const record of rows) {
+    for (const machine of record.machines) {
+      const id = hash(
+        `${record.part}|${machine}`
+      ).slice(0, 32);
 
-      result.set(key, {
-        ...r,
+      map.set(id, {
+        ...record,
         machine
       });
     }
   }
 
-  return result;
+  return map;
 }
 
 // ==========================================
 // ENVIAR NOTIFICACIONES FCM
 // ==========================================
 
-async function notifyFor(entriesToNotify, db) {
-  const snapshot = await db.collection('users').get();
+async function notifyFor(fresh, db) {
+  const snapshot = await db
+    .collection('users')
+    .get();
 
   const recipients = [];
 
   for (const user of snapshot.docs) {
-    const u = user.data();
+    const data = user.data();
 
-    const follows = new Set(
+    // Máquinas registradas por el bombero.
+    const followed = new Set(
       (
-        Array.isArray(u.machines)
-          ? u.machines
+        Array.isArray(data.machines)
+          ? data.machines
           : []
       ).map(normalizeMachine)
     );
 
+    // Tokens de los dispositivos.
     const tokens = [
       ...new Set(
         (
-          Array.isArray(u.fcmTokens)
-            ? u.fcmTokens
+          Array.isArray(data.fcmTokens)
+            ? data.fcmTokens
             : []
         ).filter(
           t => typeof t === 'string' && t.length > 20
@@ -235,17 +259,19 @@ async function notifyFor(entriesToNotify, db) {
       )
     ];
 
-    if (!follows.size || !tokens.length) {
+    if (!followed.size || !tokens.length) {
       continue;
     }
 
-    for (const entry of entriesToNotify) {
-      if (!follows.has(entry.machine)) {
+    for (const entry of fresh) {
+      // Solo avisar si el bombero sigue la máquina.
+      if (!followed.has(entry.machine)) {
         continue;
       }
 
       for (const token of tokens) {
         recipients.push({
+          uid: user.id,
           token,
           entry
         });
@@ -253,10 +279,10 @@ async function notifyFor(entriesToNotify, db) {
     }
   }
 
+  // Seguridad contra envíos masivos.
   if (recipients.length > MAX_FCM_RECIPIENTS) {
     throw new Error(
-      `Demasiados destinatarios (${recipients.length}); ` +
-      'envio cancelado.'
+      `Demasiados destinatarios: ${recipients.length}.`
     );
   }
 
@@ -265,34 +291,77 @@ async function notifyFor(entriesToNotify, db) {
     `Coincidencias con usuarios/tokens: ${recipients.length}.`
   );
 
+  // ========================================
+  // MODO DE PRUEBA
+  // ========================================
+
   if (DRY_RUN) {
     console.log(
       'DRY_RUN=true: no se enviaron mensajes FCM.'
     );
+
     return;
   }
 
-  let ok = 0;
-  let errors = 0;
+  // ========================================
+  // CONTROL DE DUPLICADOS Y ENVÍOS
+  // ========================================
 
-  for (const { token, entry } of recipients) {
+  let sent = 0;
+  let skipped = 0;
+  let failed = 0;
+
+  for (const { uid, token, entry } of recipients) {
+    // Identificador de entrega:
+    // parte + máquina + usuario + token.
+    //
+    // El documento no contiene el token en claro.
+    const deliveryId = hash(
+      `${entry.part}|${entry.machine}|${uid}|${token}`
+    );
+
+    const deliveryRef = db
+      .collection('sgo_fcm_deliveries')
+      .doc(deliveryId);
+
+    const previous = await deliveryRef.get();
+
+    // Si Firebase ya aceptó el mensaje,
+    // no volver a enviarlo normalmente.
+    if (
+      previous.exists &&
+      previous.get('status') === 'sent'
+    ) {
+      skipped++;
+      continue;
+    }
+
     try {
-      await getMessaging().send({
+      const messageId = await getMessaging().send({
         token,
 
+        // Mensaje de solo datos.
+        // El receptor de Flutter crea la alerta.
         data: {
           tipo: 'emergencia',
+
           maquina: entry.machine,
+
           emergencia:
             entry.emergency || 'Emergencia',
+
           direccion:
             entry.address || '',
+
           numeroParte:
             entry.part,
+
           fecha:
             entry.date || '',
+
           estado:
             entry.status || '',
+
           simulacro: 'false'
         },
 
@@ -301,9 +370,27 @@ async function notifyFor(entriesToNotify, db) {
         }
       });
 
-      ok++;
+      // Registrar mensaje aceptado por Firebase.
+      await deliveryRef.set({
+        status: 'sent',
+
+        part: entry.part,
+
+        machine: entry.machine,
+
+        uid,
+
+        messageId,
+
+        sentAt: FieldValue.serverTimestamp()
+      }, {
+        merge: true
+      });
+
+      sent++;
+
     } catch (error) {
-      errors++;
+      failed++;
 
       console.error(
         `FCM fallo para parte ${entry.part}, ` +
@@ -314,14 +401,17 @@ async function notifyFor(entriesToNotify, db) {
   }
 
   console.log(
-    `FCM acepto ${ok} mensajes; fallaron ${errors}.`
+    `FCM: enviados=${sent}; ` +
+    `omitidos por duplicado=${skipped}; ` +
+    `fallidos=${failed}.`
   );
 
-  if (errors) {
+  if (failed) {
     throw new Error(
-      'Hubo envios fallidos: no se actualizo el estado ' +
-      'para evitar perder alertas. ' +
-      'Revisar posibles duplicados al reintentar.'
+      'Uno o mas envios fallaron. ' +
+      'No se actualizara la linea base; ' +
+      'los exitosos no se reenviaran ' +
+      'en un reintento normal.'
     );
   }
 }
@@ -331,6 +421,7 @@ async function notifyFor(entriesToNotify, db) {
 // ==========================================
 
 async function main() {
+  // Obtener credenciales desde GitHub Secrets.
   const json = process.env.FIREBASE_SERVICE_ACCOUNT;
 
   if (!json) {
@@ -341,9 +432,11 @@ async function main() {
 
   const account = JSON.parse(json);
 
-  if (account.project_id !== 'alertas-sgo-bomberos') {
+  if (
+    account.project_id !== 'alertas-sgo-bomberos'
+  ) {
     throw new Error(
-      'La clave no corresponde al proyecto Firebase esperado'
+      'La clave no corresponde al proyecto esperado'
     );
   }
 
@@ -353,7 +446,7 @@ async function main() {
 
   const db = getFirestore();
 
-  // Obtener emergencias actuales.
+  // Leer emergencias publicadas.
   const rows = await getSGO();
 
   const current = entries(rows);
@@ -370,15 +463,21 @@ async function main() {
     `RESET_BASELINE=${RESET_BASELINE}`
   );
 
-  // Consultar historial de Firestore.
+  // ========================================
+  // CONSULTAR HISTORIAL FIRESTORE
+  // ========================================
+
   const ref = db.doc(STATE_DOC);
 
   const oldSnapshot = await ref.get();
 
+  const data = oldSnapshot.exists
+    ? oldSnapshot.data()
+    : {};
+
   const known = new Set(
-    oldSnapshot.exists &&
-    Array.isArray(oldSnapshot.data().known)
-      ? oldSnapshot.data().known
+    Array.isArray(data.known)
+      ? data.known
       : []
   );
 
@@ -392,15 +491,13 @@ async function main() {
   );
 
   // ========================================
-  // REINICIALIZAR LINEA BASE
+  // REINICIALIZAR LÍNEA BASE
   // ========================================
 
-  // Actualiza el historial usando los
-  // despachos publicados actualmente.
-  //
-  // Nunca envia mensajes durante el reset.
-
-  if (RESET_BASELINE || !oldSnapshot.exists) {
+  if (
+    RESET_BASELINE ||
+    !oldSnapshot.exists
+  ) {
     await ref.set({
       known: currentIds.slice(-1500),
 
@@ -419,18 +516,15 @@ async function main() {
     });
 
     console.log(
-      RESET_BASELINE
-        ? 'LINEA BASE REINICIALIZADA. ' +
-          'No se envio ninguna emergencia anterior.'
-        : 'Linea base inicializada. ' +
-          'No se enviaron emergencias anteriores.'
+      'LINEA BASE ACTUALIZADA. ' +
+      'No se enviaron emergencias anteriores.'
     );
 
     return;
   }
 
   // ========================================
-  // DETECTAR ASIGNACIONES NUEVAS
+  // DETECTAR NUEVAS ASIGNACIONES
   // ========================================
 
   const fresh = [...current].filter(
@@ -441,24 +535,25 @@ async function main() {
     `Asignaciones nuevas desde la ultima revision: ${fresh.length}`
   );
 
+  // Prevenir envíos masivos accidentales.
   if (fresh.length > MAX_NEW) {
     throw new Error(
-      `Demasiadas asignaciones nuevas (${fresh.length}). ` +
-      'Mantenga DRY_RUN=true y ejecute ' +
-      'reinicializacion controlada. ' +
-      'No se enviaron notificaciones.'
+      `Demasiadas asignaciones nuevas (${fresh.length}); ` +
+      'no se enviaron notificaciones.'
     );
   }
 
-  for (const [, e] of fresh.slice(0, 15)) {
+  // Mostrar hasta 15 asignaciones nuevas.
+  for (const [, entry] of fresh.slice(0, 15)) {
     console.log(
-      `Nuevo: ${e.part} / ${e.machine} / ${e.emergency}`
+      `Nuevo: ${entry.part} / ` +
+      `${entry.machine} / ${entry.emergency}`
     );
   }
 
   if (fresh.length) {
     await notifyFor(
-      fresh.map(([, e]) => e),
+      fresh.map(([, entry]) => entry),
       db
     );
   }
@@ -477,12 +572,8 @@ async function main() {
   }
 
   // ========================================
-  // ACTUALIZAR HISTORIAL
+  // ACTUALIZAR LÍNEA BASE
   // ========================================
-
-  // Conservar identificadores anteriores
-  // y los que aparecen actualmente.
-  // Evita notificaciones repetidas.
 
   const next = [
     ...new Set([
@@ -499,7 +590,8 @@ async function main() {
   });
 
   console.log(
-    'Estado de asignaciones actualizado.'
+    'Estado actualizado. ' +
+    'Las asignaciones revisadas se marcaron como conocidas.'
   );
 }
 

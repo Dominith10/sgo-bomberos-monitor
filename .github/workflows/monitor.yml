@@ -1,0 +1,26 @@
+name: Monitor SGO Norte
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '3/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: monitor-sgo-norte
+  cancel-in-progress: false
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - name: Consultar SGO y comprobar coincidencias
+        run: node monitor_sgo.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          DRY_RUN: 'true'

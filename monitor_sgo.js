@@ -337,38 +337,43 @@ async function notifyFor(fresh, db) {
     }
 
     try {
-      const messageId = await getMessaging().send({
-        token,
+      
+const messageId = await getMessaging().send({
+  token,
 
-        // Mensaje de solo datos.
-        // El receptor de Flutter crea la alerta.
-        data: {
-          tipo: 'emergencia',
+  // Notificación que Android puede mostrar
+  // directamente cuando la app está en segundo plano.
+  notification: {
+    title: `🚨 SGO NORTE - ${entry.machine}`,
+    body: `${entry.emergency || 'Emergencia'} | Parte: ${entry.part}`
+  },
 
-          maquina: entry.machine,
+  // Datos utilizados al tocar la notificación.
+  data: {
+    tipo: 'emergencia',
+    maquina: String(entry.machine),
+    emergencia: String(entry.emergency || 'Emergencia'),
+    direccion: String(entry.address || ''),
+    numeroParte: String(entry.part),
+    fecha: String(entry.date || ''),
+    estado: String(entry.status || ''),
+    simulacro: 'false'
+  },
 
-          emergencia:
-            entry.emergency || 'Emergencia',
+  android: {
+    priority: 'high',
 
-          direccion:
-            entry.address || '',
+    // Mantener el canal con el que funcionó
+    // nuestro último simulacro.
+    notification: {
+      channelId: 'sgo_emergencias_background_v1',
+      priority: 'high',
+      visibility: 'public',
+      defaultSound: true
+    }
+  }
+});
 
-          numeroParte:
-            entry.part,
-
-          fecha:
-            entry.date || '',
-
-          estado:
-            entry.status || '',
-
-          simulacro: 'false'
-        },
-
-        android: {
-          priority: 'high'
-        }
-      });
 
       // Registrar mensaje aceptado por Firebase.
       await deliveryRef.set({

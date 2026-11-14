@@ -23,32 +23,39 @@ function readRows(html) {
   const $ = cheerio.load(html);
   const records = [];
   const tables = $('table');
-  let candidates = 0;
+  let candidateRows = 0;
+  let skippedRows = 0;
+  const diagnostics = [];
 
   tables.each((_ti, table) => {
     const headers = $(table).find('thead tr').first().find('th').map((_, th) =>
       $(th).text().replace(/\s+/g, ' ').trim().toLowerCase()
     ).get();
-    const idx = (pattern, fallback) => {
-      const n = headers.findIndex(h => pattern.test(h));
-      return n >= 0 ? n : fallback;
-    };
-    const partIndex = idx(/nro\.?\s*parte|n[uú]mero\s*de\s*parte/, 1);
-    const dateIndex = idx(/fecha/, 2);
-    const addressIndex = idx(/direcci[oó]n/, 3);
-    const emergencyIndex = idx(/^tipo|tipo\s*emergencia/, 4);
-    const statusIndex = idx(/estado/, 5);
-    const machineIndex = idx(/m[aá]quinas|unidades/, 6);
+    if (!headers.some(h => /nro\.?\s*parte|n[uú]mero\s*de\s*parte/i.test(h)) ||
+        !headers.some(h => /m[aá]quinas|unidades/i.test(h))) return;
 
     $(table).find('tr').each((_ri, row) => {
       const cells = $(row).children('td');
-      if (cells.length < 7) return;
-      candidates++;
-      if (Math.max(partIndex, dateIndex, addressIndex, emergencyIndex, statusIndex, machineIndex) >= cells.length) return;
-      const part = $(cells[partIndex]).text().trim().replace(/\s+/g, '');
-      if (!/^\d{6,20}$/.test(part)) return;
+      if (cells.length < 6) return;
+      candidateRows++;
       const clean = n => $(cells[n]).text().replace(/\s+/g, ' ').trim();
-      const machineCell = $(cells[machineIndex]);
+      // SGO puede omitir la primera columna (#) en el cuerpo de la tabla.
+      // Localizamos el numero de parte, en vez de asumir un indice fijo.
+      let partIndex = -1;
+      for (const i of [1, 0]) {
+        if (i < cells.length && /^\d{8,14}$/.test(clean(i).replace(/\s/g, ''))) {
+          partIndex = i;
+          break;
+        }
+      }
+      if (partIndex < 0 || partIndex + 5 >= cells.length) {
+        skippedRows++;
+        if (diagnostics.length < 2) diagnostics.push({ celdas: cells.length,
+          primerosCampos: [clean(0), clean(1)].map(x => x.slice(0, 22)) });
+        return;
+      }
+      const part = clean(partIndex).replace(/\s/g, '');
+      const machineCell = $(cells[partIndex + 5]);
       const list = machineCell.find('li');
       const rawMachines = list.length
         ? list.map((_, li) => $(li).text()).get()
@@ -56,39 +63,24 @@ function readRows(html) {
       const machines = [...new Set(rawMachines.map(normalizeMachine).filter(Boolean))];
       records.push({
         part,
-        date: clean(dateIndex),
-        address: clean(addressIndex),
-        emergency: clean(emergencyIndex),
-        status: clean(statusIndex),
+        date: clean(partIndex + 1),
+        address: clean(partIndex + 2),
+        emergency: clean(partIndex + 3),
+        status: clean(partIndex + 4),
         machines,
       });
     });
   });
-
-  if (!records.length) {
-    // Diagnostico limitado. No imprimir credenciales, cookies ni HTML completo.
-    const title = $('title').first().text().replace(/\s+/g, ' ').trim().slice(0, 120);
-    const headings = $('h1,h2,h3,h4').slice(0, 5).map((_, e) =>
-      $(e).text().replace(/\s+/g, ' ').trim().slice(0, 90)
-    ).get();
-    const samples = tables.slice(0, 3).map((_, t) => ({
-      filas: $(t).find('tr').length,
-      encabezados: $(t).find('thead th').map((_, th) =>
-        $(th).text().replace(/\s+/g, ' ').trim().slice(0, 35)
-      ).get().slice(0, 9),
-      celdasPrimeraFila: $(t).find('tr').filter((_, tr) => $(tr).children('td').length > 0).first().children('td').length,
-    })).get();
-    console.error('SGO DIAGNOSTICO:', JSON.stringify({
-      titulo: title,
-      longitudHTML: html.length,
-      tablas: tables.length,
-      filasConSieteCeldas: candidates,
-      encabezadosPagina: headings,
-      muestrasTabla: samples,
-    }));
-    throw new Error('No se pudo interpretar la tabla de SGO Norte. No se modificó el estado.');
+  const unique = [...new Set(records.map(r => r.part))].length;
+  const withMachines = records.filter(r => r.machines.length > 0).length;
+  console.log(`SGO lectura: ${tables.length} tablas, ${candidateRows} filas candidatas, ${records.length} partes interpretados, ${withMachines} con maquinas, ${skippedRows} descartados.`);
+  if (diagnostics.length) console.log('SGO filas descartadas (solo IDs):', JSON.stringify(diagnostics));
+  // No grabar linea base ni enviar mensajes si la pagina cambia o queda mal interpretada.
+  if (records.length < 5 || unique < 5 || (candidateRows > 10 && records.length < candidateRows * 0.7)) {
+    throw new Error('La estructura SGO no pudo verificarse con seguridad. No se modifico el estado.');
   }
   if (records.length > MAX_RECORDS) throw new Error('Numero de filas inesperado: ' + records.length);
+  console.log('SGO muestra (solo parte y maquinas):', JSON.stringify(records.slice(0, 3).map(r => ({parte:r.part, maquinas:r.machines}))));
   return records;
 }
 

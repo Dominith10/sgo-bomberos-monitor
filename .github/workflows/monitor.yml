@@ -32,5 +32,5 @@ jobs:
         run: node monitor_sgo.js
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          DRY_RUN: 'true'
+          DRY_RUN: 'false'
           RESET_BASELINE: 'false'

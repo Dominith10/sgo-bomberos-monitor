@@ -1,0 +1,39 @@
+
+name: Simulacro FCM Samsung
+
+on:
+  workflow_dispatch:
+    inputs:
+      maquina:
+        description: 'Maquina registrada en el Samsung'
+        required: true
+        default: 'RESLIG-36'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  simulacro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    steps:
+      - name: Descargar archivos
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Enviar simulacro al Samsung
+        run: node simulacro_fcm.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          FCM_TEST_TOKEN: ${{ secrets.FCM_TEST_TOKEN }}
+          MAQUINA_PRUEBA: ${{ inputs.maquina }}

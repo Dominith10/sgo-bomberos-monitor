@@ -1,0 +1,12 @@
+{
+  "name": "sgo-bomberos-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": { "monitor": "node monitor_sgo.js" },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "firebase-admin": "^14.5.0"
+  },
+  "engines": { "node": ">=22" }
+}
